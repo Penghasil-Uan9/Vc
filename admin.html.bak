@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Admin - VC Dashboard</title>
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <div class="container">
+    <header><h1>Admin Dashboard</h1></header>
+
+    <main id="login-screen">
+      <div class="card">
+        <label>Username</label>
+        <input id="admin-user" />
+        <label>Password</label>
+        <input id="admin-pass" type="password" />
+        <div class="row">
+          <button id="admin-login">Login</button>
+        </div>
+        <p class="hint">Username: <b>admin</b> Password: <b>12345</b></p>
+      </div>
+    </main>
+
+    <section id="dashboard" class="hidden">
+      <div class="card">
+        <div class="row" style="align-items:center;">
+          <input id="search-input" placeholder="Cari kode ruangan atau jumlah user" />
+          <button id="refresh-btn">Refresh</button>
+          <button id="logout-btn" class="danger">Logout</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Ruangan Aktif</h3>
+        <div id="room-list"></div>
+      </div>
+    </section>
+
+    <footer><small>Auto-refresh: setiap ~3 detik. Hapus ruangan akan mengarahkan user keluar.</small></footer>
+  </div>
+
+  <script src="js/admin.js"></script>
+</body>
+</html>

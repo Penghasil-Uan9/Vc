@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Simple Web VC - MobaPay Demo</title>
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Simple Web Video Call</h1>
+      <p>Masuk/ buat ruangan untuk mulai panggilan</p>
+    </header>
+
+    <main id="main-screen">
+      <div class="card">
+        <label for="room-input">Kode Ruangan</label>
+        <input id="room-input" placeholder="Masukkan kode atau kosongkan untuk buat baru" />
+        <div class="row">
+          <button id="create-room-btn">Buat Ruangan</button>
+          <button id="join-room-btn">Gabung Ruangan</button>
+        </div>
+        <p class="hint">Kode ruangan dibuat otomatis 6–8 karakter (huruf+angka).</p>
+      </div>
+      <div class="card small">
+        <p>Atau buka halaman <a href="admin.html" target="_blank">Admin</a></p>
+      </div>
+    </main>
+
+    <section id="vc-screen" class="hidden">
+      <div class="vc-top">
+        <div>Room: <span id="room-code-display"></span></div>
+        <div id="vc-actions">
+          <button id="mute-btn">Mute</button>
+          <button id="cam-btn">Camera Off</button>
+          <button id="leave-btn" class="danger">Leave</button>
+        </div>
+      </div>
+
+      <div class="videos">
+        <div class="video-box">
+          <h4>Anda</h4>
+          <video id="localVideo" autoplay muted playsinline></video>
+        </div>
+        <div class="video-box">
+          <h4>Orang Lain</h4>
+          <div id="remotes"></div>
+        </div>
+      </div>
+
+      <div id="status"></div>
+    </section>
+
+    <footer>
+      <small>Demo WebRTC (signaling: BroadcastChannel + localStorage). Hanya untuk same-origin / same-browser demo.</small>
+    </footer>
+  </div>
+
+  <script src="js/webrtc.js"></script>
+  <script src="js/main.js"></script>
+</body>
+</html>

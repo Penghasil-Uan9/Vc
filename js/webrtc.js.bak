@@ -1,0 +1,270 @@
+// webrtc.js
+// Tanggung jawab: signaling via BroadcastChannel (fallback localStorage),
+// manajemen object activeRooms di localStorage, helper WebRTC utilities.
+
+// Utilities
+function randString(len = 8) {
+  const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  let s = "";
+  for (let i = 0; i < len; i++) s += chars[Math.floor(Math.random() * chars.length)];
+  return s;
+}
+
+function nowISO(){ return new Date().toISOString(); }
+
+// Active rooms stored under key 'vc_active_rooms' as JSON object:
+// { roomCode: { createdAt: ISO, users: { clientId: timestamp, ... } } }
+const STORAGE_KEY = "vc_active_rooms";
+
+// read/write helpers
+function readRooms(){
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch(e) {
+    console.error("readRooms error", e);
+    return {};
+  }
+}
+function writeRooms(obj){
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(obj));
+  // also dispatch a storage event-like notification for same-tab listeners
+  window.dispatchEvent(new Event("vc_rooms_updated"));
+}
+
+// Signaling channel (BroadcastChannel) with fallback to localStorage events
+const CHANNEL_NAME = "vc-signaling";
+let bc = null;
+let useBroadcast = false;
+try {
+  if ("BroadcastChannel" in window) {
+    bc = new BroadcastChannel(CHANNEL_NAME);
+    useBroadcast = true;
+  }
+} catch(e){ useBroadcast = false; bc = null; }
+
+function postSignalMessage(msg){
+  msg._ts = Date.now();
+  if (useBroadcast && bc) {
+    bc.postMessage(msg);
+  } else {
+    // fallback: write to localStorage ping key (others listening via storage event)
+    localStorage.setItem("vc_signal_msg", JSON.stringify(msg));
+    // also fire an event for same-tab listeners
+    window.dispatchEvent(new Event("vc_signal_sent"));
+  }
+}
+function onSignal(callback){
+  if (useBroadcast && bc) {
+    bc.onmessage = (ev)=>callback(ev.data);
+  } else {
+    window.addEventListener("storage", (ev)=>{
+      if(ev.key === "vc_signal_msg" && ev.newValue){
+        try { callback(JSON.parse(ev.newValue)); } catch(e){}
+      }
+    });
+    // same-tab fallback
+    window.addEventListener("vc_signal_sent", ()=>{
+      const raw = localStorage.getItem("vc_signal_msg");
+      if(raw) callback(JSON.parse(raw));
+    });
+  }
+}
+
+// ensure room exists
+function ensureRoom(roomCode){
+  const rooms = readRooms();
+  if(!rooms[roomCode]){
+    rooms[roomCode] = { createdAt: nowISO(), users: {} };
+    writeRooms(rooms);
+  }
+  return rooms[roomCode];
+}
+
+// add user to room
+function addUserToRoom(roomCode, clientId){
+  const rooms = readRooms();
+  ensureRoom(roomCode);
+  rooms[roomCode].users[clientId] = Date.now();
+  writeRooms(rooms);
+  postSignalMessage({type:"user-joined",room:roomCode,clientId});
+}
+
+// remove user from room; delete room if empty
+function removeUserFromRoom(roomCode, clientId){
+  const rooms = readRooms();
+  if(!rooms[roomCode]) return;
+  delete rooms[roomCode].users[clientId];
+  const count = Object.keys(rooms[roomCode].users).length;
+  if(count === 0){
+    delete rooms[roomCode];
+    postSignalMessage({type:"room-deleted",room:roomCode,by:clientId});
+  }
+  writeRooms(rooms);
+  postSignalMessage({type:"user-left",room:roomCode,clientId});
+}
+
+// admin delete room
+function adminDeleteRoom(roomCode){
+  const rooms = readRooms();
+  if(!rooms[roomCode]) return;
+  delete rooms[roomCode];
+  writeRooms(rooms);
+  postSignalMessage({type:"room-deleted",room:roomCode,by:"admin"});
+}
+
+// WebRTC peer management
+class VCManager {
+  constructor({roomCode, clientId, onRemoteStream, onLocalStream, onStatus}) {
+    this.room = roomCode;
+    this.clientId = clientId;
+    this.onRemoteStream = onRemoteStream;
+    this.onLocalStream = onLocalStream;
+    this.onStatus = onStatus || (()=>{});
+    this.pcMap = {}; // remoteId => RTCPeerConnection
+    this.stream = null;
+    this.configuration = { iceServers: [{urls: "stun:stun.l.google.com:19302"}] };
+    this._init();
+  }
+
+  async _init(){
+    try {
+      this.stream = await navigator.mediaDevices.getUserMedia({video:true,audio:true});
+      if(this.onLocalStream) this.onLocalStream(this.stream);
+      addUserToRoom(this.room, this.clientId);
+
+      // listen signaling
+      onSignal(async (msg)=> {
+        if(!msg || msg.room !== this.room) return;
+        if(msg.clientId === this.clientId) return; // ignore self messages for some types
+        switch(msg.type){
+          case "user-joined":
+            // existing user sees new user - create offer to new user
+            if(msg.clientId !== this.clientId){
+              // create PC for msg.clientId
+              await this._createOfferTo(msg.clientId);
+            }
+            break;
+          case "offer":
+            if(msg.target !== this.clientId) return;
+            await this._handleOffer(msg.offer, msg.clientId);
+            break;
+          case "answer":
+            if(!this.pcMap[msg.clientId]) return;
+            if(msg.target !== this.clientId) return;
+            await this.pcMap[msg.clientId].setRemoteDescription(new RTCSessionDescription(msg.answer));
+            break;
+          case "candidate":
+            if(!this.pcMap[msg.clientId]) return;
+            if(msg.target !== this.clientId) return;
+            try{
+              await this.pcMap[msg.clientId].addIceCandidate(new RTCIceCandidate(msg.candidate));
+            }catch(e){ console.warn("addIce failed", e); }
+            break;
+          case "user-left":
+            // remote left
+            this._closePeer(msg.clientId);
+            break;
+          case "room-deleted":
+            // server/admin deleted room
+            if(msg.room === this.room){
+              this.onStatus("room-deleted");
+              this.closeAll("room-deleted");
+            }
+            break;
+        }
+      });
+
+      // announce presence to existing users: send 'user-joined' was already sent in addUserToRoom
+      this.onStatus("joined");
+    } catch(e){
+      console.error("getUserMedia error", e);
+      this.onStatus("media-error");
+    }
+  }
+
+  async _createPeer(remoteId){
+    if(this.pcMap[remoteId]) return this.pcMap[remoteId];
+    const pc = new RTCPeerConnection(this.configuration);
+    this.pcMap[remoteId] = pc;
+
+    // add local tracks
+    if(this.stream){
+      for(const t of this.stream.getTracks()) pc.addTrack(t, this.stream);
+    }
+
+    // ontrack -> remote stream
+    const remoteStream = new MediaStream();
+    pc.ontrack = (ev)=> {
+      ev.streams[0].getTracks().forEach(t => remoteStream.addTrack(t));
+      if(this.onRemoteStream) this.onRemoteStream(remoteId, remoteStream);
+    };
+
+    // ICE candidate
+    pc.onicecandidate = (ev)=>{
+      if(ev.candidate){
+        postSignalMessage({type:"candidate",room:this.room,clientId:this.clientId,target:remoteId,candidate:ev.candidate});
+      }
+    };
+
+    // close
+    pc.onconnectionstatechange = ()=> {
+      if(pc.connectionState === "disconnected" || pc.connectionState === "failed" || pc.connectionState === "closed"){
+        this._closePeer(remoteId);
+      }
+    };
+
+    return pc;
+  }
+
+  async _createOfferTo(remoteId){
+    const pc = await this._createPeer(remoteId);
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    postSignalMessage({type:"offer",room:this.room,clientId:this.clientId,target:remoteId,offer:pc.localDescription});
+  }
+
+  async _handleOffer(offer, remoteId){
+    const pc = await this._createPeer(remoteId);
+    await pc.setRemoteDescription(new RTCSessionDescription(offer));
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    postSignalMessage({type:"answer",room:this.room,clientId:this.clientId,target:remoteId,answer:pc.localDescription});
+  }
+
+  _closePeer(remoteId){
+    const pc = this.pcMap[remoteId];
+    if(pc){
+      try{ pc.close(); }catch(e){}
+      delete this.pcMap[remoteId];
+      if(this.onRemoteStream) this.onRemoteStream(remoteId, null); // inform to remove remote video
+    }
+  }
+
+  closeAll(reason){
+    // remove from room then close
+    removeUserFromRoom(this.room, this.clientId);
+    for(const k of Object.keys(this.pcMap)) this._closePeer(k);
+    if(this.stream){
+      for(const t of this.stream.getTracks()) t.stop();
+      this.stream = null;
+    }
+    this.onStatus("left:"+String(reason||"user"));
+  }
+
+  mute(m){
+    if(!this.stream) return;
+    this.stream.getAudioTracks().forEach(t=>t.enabled = !m);
+  }
+
+  cam(off){
+    if(!this.stream) return;
+    this.stream.getVideoTracks().forEach(t=>t.enabled = !off);
+  }
+}
+
+// Exports for other scripts
+window.VC = {
+  randString, ensureRoom, readRooms, writeRooms, addUserToRoom,
+  removeUserFromRoom, adminDeleteRoom, VCManager
+};

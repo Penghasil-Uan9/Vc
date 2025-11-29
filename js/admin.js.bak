@@ -1,0 +1,128 @@
+// admin.js - admin page logic
+
+const STORAGE_KEY = "vc_active_rooms";
+const adminUser = document.getElementById("admin-user");
+const adminPass = document.getElementById("admin-pass");
+const loginBtn = document.getElementById("admin-login");
+const loginScreen = document.getElementById("login-screen");
+const dashboard = document.getElementById("dashboard");
+const roomList = document.getElementById("room-list");
+const searchInput = document.getElementById("search-input");
+const refreshBtn = document.getElementById("refresh-btn");
+const logoutBtn = document.getElementById("logout-btn");
+
+let autoRefreshTimer = null;
+
+function readRooms(){
+  try { const r = localStorage.getItem(STORAGE_KEY); return r ? JSON.parse(r) : {}; }
+  catch(e){ return {}; }
+}
+
+function renderRooms(filter=""){
+  const rooms = readRooms();
+  const queries = filter.trim().toLowerCase();
+
+  roomList.innerHTML = "";
+  const keys = Object.keys(rooms).sort((a,b)=>rooms[a].createdAt < rooms[b].createdAt ? 1 : -1);
+  if(keys.length === 0){
+    roomList.innerHTML = "<div class='hint'>Tidak ada ruangan aktif.</div>";
+    return;
+  }
+
+  for(const k of keys){
+    const r = rooms[k];
+    const userCount = Object.keys(r.users||{}).length;
+    const created = new Date(r.createdAt).toLocaleString();
+
+    // filter
+    let keep = true;
+    if(queries){
+      if(isFinite(Number(queries))){
+        // search by user count
+        keep = Number(queries) === userCount;
+      } else {
+        keep = k.toLowerCase().includes(queries);
+      }
+    }
+    if(!keep) continue;
+
+    const item = document.createElement("div");
+    item.className = "room-item";
+    item.innerHTML = `
+      <div>
+        <div><strong>${k}</strong></div>
+        <div class="room-meta">Users: ${userCount} • Created: ${created}</div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <button class="small-btn" data-room="${k}" data-action="inspect">Inspect</button>
+        <button class="small-btn danger" data-room="${k}" data-action="delete">Delete</button>
+      </div>
+    `;
+    roomList.appendChild(item);
+  }
+}
+
+loginBtn.addEventListener("click", ()=>{
+  const u = adminUser.value.trim();
+  const p = adminPass.value.trim();
+  if(u === "admin" && p === "12345"){
+    loginScreen.classList.add("hidden");
+    dashboard.classList.remove("hidden");
+    startAutoRefresh();
+  } else {
+    alert("Login salah.");
+  }
+});
+
+logoutBtn.addEventListener("click", ()=>{
+  stopAutoRefresh();
+  dashboard.classList.add("hidden");
+  loginScreen.classList.remove("hidden");
+  adminUser.value = ""; adminPass.value = "";
+});
+
+function startAutoRefresh(){
+  renderRooms();
+  if(autoRefreshTimer) clearInterval(autoRefreshTimer);
+  autoRefreshTimer = setInterval(()=>renderRooms(searchInput.value||""), 3000);
+}
+function stopAutoRefresh(){ if(autoRefreshTimer) clearInterval(autoRefreshTimer); autoRefreshTimer = null; }
+
+refreshBtn.addEventListener("click", ()=>renderRooms(searchInput.value||""));
+searchInput.addEventListener("input", ()=>renderRooms(searchInput.value||""));
+
+// delegate clicks
+roomList.addEventListener("click", (e)=>{
+  const btn = e.target.closest("button");
+  if(!btn) return;
+  const action = btn.dataset.action;
+  const room = btn.dataset.room;
+  if(action === "delete"){
+    if(!confirm("Hapus ruangan "+room+" ? Ini akan mengeluarkan semua user.")) return;
+    // delete from localStorage and broadcast via signaling key
+    const rooms = readRooms();
+    if(rooms[room]) delete rooms[room];
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(rooms));
+    // notify via signal (simple)
+    localStorage.setItem("vc_admin_action", JSON.stringify({type:"room-deleted",room,by:"admin",_ts:Date.now()}));
+    window.dispatchEvent(new Event("vc_rooms_updated"));
+    renderRooms(searchInput.value||"");
+  } else if(action === "inspect"){
+    const rooms = readRooms();
+    const r = rooms[room];
+    if(!r) { alert("Ruangan tidak ditemukan."); return; }
+    const users = Object.keys(r.users||{}).map(u=>`${u} (lastSeen:${new Date(r.users[u]).toLocaleTimeString()})`).join("\n");
+    alert(`Room ${room}\nCreated: ${new Date(r.createdAt).toLocaleString()}\nUsers (${Object.keys(r.users||{}).length}):\n${users}`);
+  }
+});
+
+// listen to external updates (vc code writes)
+window.addEventListener("storage", (ev)=>{
+  if(ev.key === STORAGE_KEY || ev.key === "vc_admin_action" || ev.key === "vc_signal_msg"){
+    renderRooms(searchInput.value||"");
+  }
+});
+window.addEventListener("vc_rooms_updated", ()=>renderRooms(searchInput.value||""));
+
+// also poll on load
+renderRooms();
